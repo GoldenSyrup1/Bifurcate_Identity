@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Bifurcate-Identity — migration safety demo</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    margin: 0;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--dim); font-size: 13px; margin-bottom: 20px; }
+  .newtenant { display: flex; gap: 8px; margin-bottom: 20px; }
+  input, select, button {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+  }
+  button {
+    background: #21262d;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #30363d; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: #238636; border-color: #2ea043; color: #fff; }
+  button.danger { background: #8b1a1a; border-color: #b62324; color: #fff; }
+  .tenants { display: flex; flex-direction: column; gap: 16px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .name { font-weight: 600; font-size: 15px; }
+  .phase-badge {
+    font-size: 11px; padding: 3px 8px; border-radius: 12px;
+    text-transform: uppercase; letter-spacing: 0.03em;
+    border: 1px solid var(--border);
+  }
+  .phase-legacy_only { color: var(--dim); }
+  .phase-dual_write { color: var(--amber); border-color: var(--amber); }
+  .phase-shadow_verify { color: var(--accent); border-color: var(--accent); }
+  .phase-new_only { color: var(--green); border-color: var(--green); }
+  .counts { font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .counts b { color: var(--text); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .forms { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; }
+  .form-group { display: flex; gap: 6px; }
+  .log {
+    margin-top: 12px;
+    background: #010409;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px;
+    max-height: 180px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .log .t { color: var(--dim); }
+  .log .crash { color: var(--red); }
+  .log .drift { color: var(--amber); }
+  .log .heal { color: var(--green); }
+  .result-line { font-size: 12px; color: var(--dim); margin-top: 6px; }
+</style>
+</head>
+<body>
+  <h1>Bifurcate-Identity</h1>
+  <div class="subtitle">
+    Staged migration off a legacy identity store, with feature-flag phases, dual-write, shadow-verify, and a chaos test that kills a write mid-migration to prove no data loss.
+  </div>
+
+  <div class="newtenant">
+    <input id="new-tenant-name" placeholder="New tenant name (e.g. Initech)">
+    <button class="primary" onclick="createTenant()">+ New tenant</button>
+  </div>
+
+  <div id="tenants" class="tenants"></div>
+
+<script>
+const PHASE_LABEL = {
+  legacy_only: "legacy only",
+  dual_write: "dual-write",
+  shadow_verify: "shadow-verify",
+  new_only: "new only (cutover)",
+};
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function createTenant() {
+  const nameInput = document.getElementById("new-tenant-name");
+  const name = nameInput.value.trim();
+  if (!name) return;
+  await api("/api/tenants", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({name}) });
+  nameInput.value = "";
+  render();
+}
+
+async function advance(id) {
+  await api(`/api/tenants/${id}/advance`, { method: "POST" });
+  render();
+}
+
+async function armChaos(id) {
+  await api(`/api/tenants/${id}/chaos`, { method: "POST" });
+  render();
+}
+
+async function reconcile(id) {
+  const report = await api(`/api/tenants/${id}/reconcile`, { method: "POST" });
+  document.getElementById(`result-${id}`).textContent =
+    report.healed > 0
+      ? `Reconciled: healed ${report.healed} user(s) missing from modern (${report.missing_in_modern.join(", ")})`
+      : "Reconciled: no drift found.";
+  render();
+}
+
+async function signup(id) {
+  const email = document.getElementById(`su-email-${id}`).value.trim();
+  const password = document.getElementById(`su-password-${id}`).value || "demo-pass";
+  if (!email) return;
+  const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+  await api(`/api/tenants/${id}/signup`, {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({email, password, request_id: requestId}),
+  });
+  document.getElementById(`su-email-${id}`).value = "";
+  render();
+}
+
+async function doLogin(id) {
+  const email = document.getElementById(`li-email-${id}`).value.trim();
+  const password = document.getElementById(`li-password-${id}`).value || "demo-pass";
+  if (!email) return;
+  const res = await api(`/api/tenants/${id}/login`, {
+    method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({email, password}),
+  });
+  let msg = `Login via ${res.answered_by}: ${res.found ? "success" : "no match"}`;
+  if (res.drift_found) msg += ` — ⚠ ${res.drift_detail}`;
+  document.getElementById(`result-${id}`).textContent = msg;
+  render();
+}
+
+function lineClass(msg) {
+  if (msg.includes("💥")) return "crash";
+  if (msg.includes("⚠")) return "drift";
+  if (msg.includes("healed")) return "heal";
+  return "";
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString();
+}
+
+async function render() {
+  const tenants = await api("/api/tenants");
+  const container = document.getElementById("tenants");
+  container.innerHTML = "";
+
+  for (const t of tenants) {
+    const log = await api(`/api/tenants/${t.id}/log`);
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-head">
+        <div>
+          <span class="name">${t.name}</span>
+          <span class="phase-badge phase-${t.phase}">${PHASE_LABEL[t.phase]}</span>
+        </div>
+        <div class="row">
+          <button ${t.can_advance ? "" : "disabled"} onclick="advance('${t.id}')">
+            Advance → ${t.can_advance ? PHASE_LABEL[t.next_phase] : "final phase"}
+          </button>
+          <button class="danger" ${(t.phase === "dual_write" || t.phase === "shadow_verify") ? "" : "disabled"} onclick="armChaos('${t.id}')">
+            ${t.chaos_armed ? "💥 chaos armed — next signup will crash" : "Arm chaos (crash mid dual-write)"}
+          </button>
+          <button onclick="reconcile('${t.id}')">Run reconciliation</button>
+        </div>
+      </div>
+      <div class="counts">legacy: <b>${t.legacy_count}</b> users · modern: <b>${t.modern_count}</b> users</div>
+
+      <div class="forms">
+        <div class="form-group">
+          <input id="su-email-${t.id}" placeholder="email" size="16">
+          <input id="su-password-${t.id}" placeholder="password" size="10">
+          <button onclick="signup('${t.id}')">Signup</button>
+        </div>
+        <div class="form-group">
+          <input id="li-email-${t.id}" placeholder="email" size="16">
+          <input id="li-password-${t.id}" placeholder="password" size="10">
+          <button onclick="doLogin('${t.id}')">Login</button>
+        </div>
+      </div>
+      <div class="result-line" id="result-${t.id}"></div>
+      <div class="log" id="log-${t.id}">${log.map(e => `<span class="t">[${fmtTime(e.at)}]</span> <span class="${lineClass(e.message)}">${e.message}</span>`).join("\n")}</div>
+    `;
+    container.appendChild(card);
+    const logEl = card.querySelector(".log");
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+render();
+setInterval(render, 4000);
+</script>
+</body>
+</html>
