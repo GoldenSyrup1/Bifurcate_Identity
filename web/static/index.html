@@ -178,7 +178,25 @@ function fmtTime(iso) {
   return d.toLocaleTimeString();
 }
 
+let formFocused = false;
+let formBlurTimeout = null;
+document.addEventListener("focusin", (e) => {
+  if (e.target.closest && e.target.closest(".forms")) {
+    formFocused = true;
+    clearTimeout(formBlurTimeout);
+  }
+});
+document.addEventListener("focusout", (e) => {
+  if (e.target.closest && e.target.closest(".forms")) {
+    // grace period: moving focus from one form field to the next (e.g. email -> password)
+    // briefly has no element focused, which would otherwise let a poll sneak through mid-interaction
+    clearTimeout(formBlurTimeout);
+    formBlurTimeout = setTimeout(() => { formFocused = false; }, 500);
+  }
+});
+
 async function render() {
+  if (formFocused) return;
   const tenants = await api("/api/tenants");
   const container = document.getElementById("tenants");
   container.innerHTML = "";

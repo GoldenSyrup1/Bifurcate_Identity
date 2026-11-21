@@ -2,6 +2,9 @@ package migration
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,8 +88,21 @@ type TenantView struct {
 func (m *Migrator) Tenants() []TenantView {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]TenantView, 0, len(m.tenants))
-	for _, t := range m.tenants {
+
+	ids := make([]string, 0, len(m.tenants))
+	for id := range m.tenants {
+		ids = append(ids, id)
+	}
+	// Stable, deterministic order (by creation sequence) instead of Go's
+	// randomized map iteration — otherwise tenant cards swap position
+	// between renders and a click can land on the wrong tenant.
+	sort.Slice(ids, func(i, j int) bool {
+		return tenantSeq(ids[i]) < tenantSeq(ids[j])
+	})
+
+	out := make([]TenantView, 0, len(ids))
+	for _, id := range ids {
+		t := m.tenants[id]
 		next, canAdvance := t.Phase.Next()
 		v := TenantView{
 			ID:          t.ID,
@@ -103,6 +119,13 @@ func (m *Migrator) Tenants() []TenantView {
 		out = append(out, v)
 	}
 	return out
+}
+
+// tenantSeq extracts the numeric sequence from an ID like "t12" → 12, so
+// sorting is numeric rather than lexicographic (t2 < t10, not "t10" < "t2").
+func tenantSeq(id string) int {
+	n, _ := strconv.Atoi(strings.TrimPrefix(id, "t"))
+	return n
 }
 
 // Advance moves a tenant to the next phase in the staged rollout. It never
